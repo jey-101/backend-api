@@ -3,9 +3,17 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: backend-api
+  GITOPS_REPO: jey-101/gitops-k8s-manifests
 
 jobs:
-  build-and-push:
+  test:
+    name: Unit & Integration Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -17,7 +25,88 @@ jobs:
         run: dotnet restore src/Backend.Api/Backend.Api.csproj
       - name: Build
         run: dotnet build src/Backend.Api/Backend.Api.csproj --no-restore
-      # - name: Push to ECR
-      #   run: echo "Docker build and push to ECR here"
-      # - name: Update GitOps repo
-      #   run: echo "Update Kustomize image tag here"
+      # To be enabled when tests are added:
+      # - name: Run Unit Tests
+      #   run: dotnet test tests/Backend.Api.UnitTests/Backend.Api.UnitTests.csproj
+      # - name: Run Integration Tests
+      #   run: dotnet test tests/Backend.Api.IntegrationTests/Backend.Api.IntegrationTests.csproj
+
+  build-scan-push:
+    name: Build, Scan & Push
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    outputs:
+      image_tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Generate Version Tag
+        id: version
+        run: |
+          # Generates a tag like v1.0.42 (using GitHub Run Number for incremental tagging)
+          TAG="v1.0.${{ github.run_number }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Generated Tag: $TAG"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build Docker Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          # Save registry for later steps
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
+
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.tag }}'
+          format: 'table'
+          exit-code: '1' # Fail pipeline if CRITICAL vulnerabilities are found
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Push Docker Image to ECR
+        env:
+          IMAGE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/$ECR_REPOSITORY:$IMAGE_TAG
+
+  update-gitops:
+    name: Update GitOps Deployment
+    needs: build-scan-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitOps Repository
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_PAT }} # Personal Access Token needed to push to another repo
+          path: gitops-repo
+
+      - name: Update Kustomize Image Tag (Dev Environment)
+        env:
+          IMAGE_TAG: ${{ needs.build-scan-push.outputs.image_tag }}
+        run: |
+          cd gitops-repo/overlays/dev
+          # Update the newTag field in kustomization.yaml to match the newly built incremental tag
+          sed -i "s/newTag: .*/newTag: $IMAGE_TAG/g" kustomization.yaml
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add kustomization.yaml
+          git commit -m "chore: update backend-api image tag to $IMAGE_TAG in dev"
+          git push
