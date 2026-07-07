@@ -4,6 +4,19 @@ This repository contains the backend REST API for the EKS Application platform. 
 
 ---
 
+## 🎯 API Overview & Purpose
+
+Currently, this API serves as the **foundational backend microservice** for the upcoming React frontend. It is scaffolded with production-ready patterns but is intentionally waiting for your specific business logic.
+
+**Current Endpoints:**
+- \`GET /\`: Root endpoint verifying the API is reachable.
+- \`GET /health\`: Kubernetes Liveness Probe endpoint.
+- \`GET /health/ready\`: Kubernetes Readiness Probe endpoint.
+
+*(Note: As we define the exact business domain—e.g., user management, product catalog, data processing—this section will be updated with the full Swagger/OpenAPI specifications and business routes.)*
+
+---
+
 ## 🏗️ Architecture & Tech Stack
 
 - **Framework**: .NET 8 (ASP.NET Core Web API)
